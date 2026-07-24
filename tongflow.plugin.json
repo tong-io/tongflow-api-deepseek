@@ -1,0 +1,20 @@
+{
+    "plugin": {
+        "name": "DeepSeek",
+        "description": "Text generation via the DeepSeek V4 API (flash / pro, with optional streaming thinking).",
+        "icon": "/plugins/tongflow-api-deepseek.svg"
+    },
+    "env": [
+        {
+            "key": "DEEPSEEK_API_KEY",
+            "required": true,
+            "description": "DeepSeek API key",
+            "url": "https://platform.deepseek.com/api_keys"
+        },
+        {
+            "key": "DEEPSEEK_BASE_URL",
+            "default": "https://api.deepseek.com",
+            "description": "Override the DeepSeek endpoint (OpenAI-compatible)"
+        }
+    ]
+}
