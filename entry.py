@@ -57,6 +57,7 @@ TONGFLOW_SLOT_PARAMS = {
             "label": "Thinking",
             "description": "Stream the model's reasoning before the answer.",
         },
+        "temperature": {"type": "number", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1, "label": "Temperature"},
     },
     "split-text": {
         "thinking": {
@@ -65,6 +66,7 @@ TONGFLOW_SLOT_PARAMS = {
             "label": "Thinking",
             "description": "Stream the model's reasoning before the answer.",
         },
+        "temperature": {"type": "number", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1, "label": "Temperature"},
     },
     "combine-text": {
         "thinking": {
@@ -73,6 +75,7 @@ TONGFLOW_SLOT_PARAMS = {
             "label": "Thinking",
             "description": "Stream the model's reasoning before the answer.",
         },
+        "temperature": {"type": "number", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1, "label": "Temperature"},
     },
 }
 
@@ -171,7 +174,7 @@ def _chat(*, user_message: str) -> str:
     model, thinking = _resolve_selection()
     payload: Dict[str, Any] = {
         "model": model,
-        "temperature": 1,
+        "temperature": float(current_params().get("temperature", 1.0)),
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
