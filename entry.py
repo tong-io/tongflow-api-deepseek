@@ -2,13 +2,15 @@
 
 DeepSeek V4 is a text-only, OpenAI-compatible model family
 (``https://api.deepseek.com``). Two models — ``deepseek-v4-flash`` (cheap/fast)
-and ``deepseek-v4-pro`` — each with an optional ``thinking`` mode. The node's
-model dropdown exposes the four combinations; ``main()`` reads the selection
-from the request envelope's top-level ``model`` field.
+and ``deepseek-v4-pro`` — plus an optional ``thinking`` mode. The node's model
+dropdown lists the two models (``main()`` reads the pick from the request
+envelope's top-level ``model`` field); thinking is a switch under the node's
+"Advanced" section, declared in ``TONGFLOW_SLOT_PARAMS`` and read through
+``current_params()``.
 
-When a ``*-thinking`` model is selected the completion is streamed and the
-reasoning (``reasoning_content``) is pushed to the node's live thinking bubble
-via ``progress(..., thinking=True)``; the final answer (``content``) is returned.
+With thinking on the completion is streamed and the reasoning
+(``reasoning_content``) is pushed to the node's live thinking bubble via
+``progress(..., thinking=True)``; the final answer (``content``) is returned.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from tongflow.node_slots import NodeSlots
-from tongflow.slots import node_slot
+from tongflow.slots import current_params, node_slot
 from tongflow.progress import progress
 from tongflow.models.gen_text import GenTextInput, GenTextOutput
 from tongflow.models.split_text import SplitTextInput, SplitTextOutput
@@ -34,27 +36,44 @@ from tongflow.llm_batch_handlers import arrange_group_output, drop_video_output
 # Per-slot model lists surfaced as the node's model dropdown. Must stay a pure
 # dict of list-of-string literals — the platform reads it by AST without
 # importing this module, so every value has to be inlined (no shared variable).
-# First entry per slot = default. The `-thinking` suffix is stripped by
-# _resolve_selection() into (base model id, thinking on/off).
+# First entry per slot = default. Thinking is a separate switch under the
+# node's "Advanced" section (TONGFLOW_SLOT_PARAMS below), not a model variant;
+# the legacy `<model>-thinking` ids from older workflows are still accepted by
+# _resolve_selection().
 TONGFLOW_SLOT_MODELS = {
-    "gen-text": [
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash-thinking",
-        "deepseek-v4-pro-thinking",
-    ],
-    "split-text": [
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash-thinking",
-        "deepseek-v4-pro-thinking",
-    ],
-    "combine-text": [
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash-thinking",
-        "deepseek-v4-pro-thinking",
-    ],
+    "gen-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    "split-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    "combine-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
+}
+
+# Per-run knobs the node offers under its collapsed "Advanced" section. Pure
+# literal (AST-scanned). Values reach the handler via current_params(); an
+# untouched switch is absent there and falls back to the default given here.
+TONGFLOW_SLOT_PARAMS = {
+    "gen-text": {
+        "thinking": {
+            "type": "boolean",
+            "default": False,
+            "label": "Thinking",
+            "description": "Stream the model's reasoning before the answer.",
+        },
+    },
+    "split-text": {
+        "thinking": {
+            "type": "boolean",
+            "default": False,
+            "label": "Thinking",
+            "description": "Stream the model's reasoning before the answer.",
+        },
+    },
+    "combine-text": {
+        "thinking": {
+            "type": "boolean",
+            "default": False,
+            "label": "Thinking",
+            "description": "Stream the model's reasoning before the answer.",
+        },
+    },
 }
 
 # Plugin logs go to stderr — stdout is reserved for the ABI JSON response.
@@ -101,11 +120,17 @@ def _require_api_key() -> str:
 
 
 def _resolve_selection() -> Tuple[str, bool]:
-    """Map the selected dropdown id to (base model id, thinking enabled)."""
+    """(base model id, thinking enabled) for this request.
+
+    Thinking comes from the node's Advanced switch (`current_params()`); a
+    legacy `<model>-thinking` dropdown id from an older workflow still turns
+    it on so saved graphs keep behaving.
+    """
     sel = (_REQUEST_MODEL or "").strip() or DEFAULT_MODEL
+    thinking = bool(current_params().get("thinking", False))
     if sel.endswith("-thinking"):
         return sel[: -len("-thinking")], True
-    return sel, False
+    return sel, thinking
 
 
 def _headers(api_key: str) -> Dict[str, str]:

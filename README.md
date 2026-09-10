@@ -16,18 +16,19 @@ Implements these ABI slots (runs locally as a Python process, no GPU):
 
 ## Models
 
-Each text node exposes a **model dropdown** with four choices:
+Each text node exposes a **model dropdown** with two choices:
 
-| Selection | Model | Thinking |
-| --- | --- | --- |
-| `deepseek-v4-flash` (default) | `deepseek-v4-flash` | off |
-| `deepseek-v4-pro` | `deepseek-v4-pro` | off |
-| `deepseek-v4-flash-thinking` | `deepseek-v4-flash` | on |
-| `deepseek-v4-pro-thinking` | `deepseek-v4-pro` | on |
+| Selection | Notes |
+| --- | --- |
+| `deepseek-v4-flash` (default) | cheap / fast |
+| `deepseek-v4-pro` | strongest |
 
-With a `*-thinking` selection the completion is **streamed** and the model's
-reasoning appears live in an auto-scrolling bubble beside the node; the final
-answer is returned as the node output.
+Thinking is a separate switch: expand the node's **Advanced** section and turn
+on **Thinking**. The completion is then **streamed** and the model's reasoning
+appears live in an auto-scrolling bubble beside the node; the final answer is
+returned as the node output. The switch is declared in the plugin's
+`TONGFLOW_SLOT_PARAMS` and read via `tongflow.slots.current_params()`; older
+workflows that still carry a `<model>-thinking` id keep thinking on.
 
 ## Credentials
 
@@ -42,10 +43,10 @@ Values are stored locally and take effect without a restart.
 
 ## Development
 
-Requires `tongflow>=0.2.17` (the streaming thinking bubble uses
-`progress(..., thinking=True)`). Install into a clean venv and type-check:
+Requires `tongflow>=0.3.3` (the Advanced **Thinking** switch uses
+`current_params()`). Install into a clean venv and type-check:
 
 ```bash
-pip install "tongflow==0.2.17"
+pip install "tongflow==0.3.3"
 pyright entry.py
 ```
