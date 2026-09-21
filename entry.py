@@ -1,12 +1,16 @@
-"""TongFlow DeepSeek plugin — text generation via the DeepSeek V4 API.
+"""TongFlow DeepSeek plugin — text and vision via the DeepSeek API.
 
-DeepSeek V4 is a text-only, OpenAI-compatible model family
-(``https://api.deepseek.com``). Two models — ``deepseek-v4-flash`` (cheap/fast)
-and ``deepseek-v4-pro`` — plus an optional ``thinking`` mode. The node's model
-dropdown lists the two models (``main()`` reads the pick from the request
-envelope's top-level ``model`` field); thinking is a switch under the node's
-"Advanced" section, declared in ``TONGFLOW_SLOT_PARAMS`` and read through
-``current_params()``.
+DeepSeek is an OpenAI-compatible API (``https://api.deepseek.com``). Two models:
+``deepseek-flash`` (V4.1 Flash — cheap/fast, natively multimodal) and
+``deepseek-v4-pro`` (text-only), plus an optional ``thinking`` mode. The node's
+model dropdown lists the models available for that slot (``main()`` reads the
+pick from the request envelope's top-level ``model`` field); thinking is a
+switch under the node's "Advanced" section, declared in
+``TONGFLOW_SLOT_PARAMS`` and read through ``current_params()``.
+
+V4.1 Flash understands images natively, so the plugin also serves the two
+vision → text slots. Images are sent inline as base64 data URLs in the
+OpenAI-style ``image_url`` content part; ``detail`` is an Advanced knob.
 
 With thinking on the completion is streamed and the reasoning
 (``reasoning_content``) is pushed to the node's live thinking bubble via
@@ -29,6 +33,8 @@ from tongflow.progress import progress
 from tongflow.models.gen_text import GenTextInput, GenTextOutput
 from tongflow.models.split_text import SplitTextInput, SplitTextOutput
 from tongflow.models.combine_text import CombineTextInput, CombineTextOutput
+from tongflow.models.image_gen_text import ImageGenTextInput, ImageGenTextOutput
+from tongflow.models.image_describe import ImageDescribeInput, ImageDescribeOutput
 from tongflow.models.drop_video import DropVideoInput, DropVideoOutput
 from tongflow.models.arrange_group import ArrangeGroupInput, ArrangeGroupOutput
 from tongflow.llm_batch_handlers import arrange_group_output, drop_video_output
@@ -39,11 +45,14 @@ from tongflow.llm_batch_handlers import arrange_group_output, drop_video_output
 # First entry per slot = default. Thinking is a separate switch under the
 # node's "Advanced" section (TONGFLOW_SLOT_PARAMS below), not a model variant;
 # the legacy `<model>-thinking` ids from older workflows are still accepted by
-# _resolve_selection().
+# _resolve_selection(). Only Flash sees images, so the vision slots list it
+# alone — V4 Pro is text-only.
 TONGFLOW_SLOT_MODELS = {
-    "gen-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
-    "split-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
-    "combine-text": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    "gen-text": ["deepseek-flash", "deepseek-v4-pro"],
+    "split-text": ["deepseek-flash", "deepseek-v4-pro"],
+    "combine-text": ["deepseek-flash", "deepseek-v4-pro"],
+    "image-gen-text": ["deepseek-flash"],
+    "image-describe": ["deepseek-flash"],
 }
 
 # Per-run knobs the node offers under its collapsed "Advanced" section. Pure
@@ -77,6 +86,36 @@ TONGFLOW_SLOT_PARAMS = {
         },
         "temperature": {"type": "number", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1, "label": "Temperature"},
     },
+    "image-gen-text": {
+        "thinking": {
+            "type": "boolean",
+            "default": False,
+            "label": "Thinking",
+            "description": "Stream the model's reasoning before the answer.",
+        },
+        "detail": {
+            "type": "select",
+            "options": ["auto", "low", "high"],
+            "default": "auto",
+            "label": "Image detail",
+            "description": "low downscales to 512x512 (faster, cheaper); high keeps the original size.",
+        },
+    },
+    "image-describe": {
+        "thinking": {
+            "type": "boolean",
+            "default": False,
+            "label": "Thinking",
+            "description": "Stream the model's reasoning before the answer.",
+        },
+        "detail": {
+            "type": "select",
+            "options": ["auto", "low", "high"],
+            "default": "auto",
+            "label": "Image detail",
+            "description": "low downscales to 512x512 (faster, cheaper); high keeps the original size.",
+        },
+    },
 }
 
 # Plugin logs go to stderr — stdout is reserved for the ABI JSON response.
@@ -88,7 +127,17 @@ logging.basicConfig(
 log = logging.getLogger("tongflow.plugins.deepseek")
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = "deepseek-flash"
+# The only model that sees images; a text-only pick on a vision slot (a graph
+# saved before V4.1 Flash) falls back to it rather than failing the run.
+VISION_MODEL = "deepseek-flash"
+# Retired ids DeepSeek only routes temporarily. Workflows saved against the V4
+# picker keep running; we map them ourselves so they survive the routing being
+# switched off.
+_LEGACY_MODEL_IDS = {
+    "deepseek-v4-flash": "deepseek-flash",
+    "deepseek-v4-flash-vision-exp": "deepseek-flash",
+}
 # Flush the streamed reasoning to the thinking bubble at most this often (chars
 # accumulated since the last flush) and cap what we send to the tail so the
 # progress message stays bounded.
@@ -132,8 +181,8 @@ def _resolve_selection() -> Tuple[str, bool]:
     sel = (_REQUEST_MODEL or "").strip() or DEFAULT_MODEL
     thinking = bool(current_params().get("thinking", False))
     if sel.endswith("-thinking"):
-        return sel[: -len("-thinking")], True
-    return sel, thinking
+        sel, thinking = sel[: -len("-thinking")], True
+    return _LEGACY_MODEL_IDS.get(sel, sel), thinking
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -168,18 +217,32 @@ def _post(url: str, payload: Dict[str, Any], api_key: str, *, timeout: int = 300
 
 
 def _chat(*, user_message: str) -> str:
-    """One-shot chat completion. Streams reasoning to the thinking bubble when
-    a thinking model is selected; returns the final answer text."""
-    api_key = _require_api_key()
-    model, thinking = _resolve_selection()
-    payload: Dict[str, Any] = {
-        "model": model,
-        "temperature": float(current_params().get("temperature", 1.0)),
-        "messages": [
+    """One-shot text completion with the plugin's default system prompt."""
+    return _chat_messages(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-    }
+        temperature=float(current_params().get("temperature", 1.0)),
+    )
+
+
+def _chat_messages(
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float | None = None,
+    vision: bool = False,
+) -> str:
+    """One-shot chat completion. Streams reasoning to the thinking bubble when
+    the Advanced thinking switch is on; returns the final answer text."""
+    api_key = _require_api_key()
+    model, thinking = _resolve_selection()
+    if vision and model != VISION_MODEL:
+        log.info("%s cannot see images; using %s", model, VISION_MODEL)
+        model = VISION_MODEL
+    payload: Dict[str, Any] = {"model": model, "messages": messages}
+    if temperature is not None:
+        payload["temperature"] = temperature
     if thinking:
         payload["thinking"] = {"type": "enabled"}
         payload["stream"] = True
@@ -314,6 +377,52 @@ def split_text(input: SplitTextInput) -> SplitTextOutput:
     return SplitTextOutput(success=True, texts=texts)
 
 
+def _data_url(asset: Any, *, default_mime: str = "image/png") -> str:
+    mime = (asset.mime or default_mime).strip() or default_mime
+    return f"data:{mime};base64,{asset.bytesBase64}"
+
+
+def _image_part(asset: Any) -> Dict[str, Any]:
+    image_url: Dict[str, Any] = {"url": _data_url(asset)}
+    detail = str(current_params().get("detail", "auto")).strip()
+    if detail and detail != "auto":
+        image_url["detail"] = detail
+    return {"type": "image_url", "image_url": image_url}
+
+
+@node_slot(NodeSlots.IMAGE_GEN_TEXT)
+def image_gen_text(input: ImageGenTextInput) -> ImageGenTextOutput:
+    content: List[Dict[str, Any]] = [{"type": "text", "text": input.text}]
+    if input.image is not None:
+        content.append(_image_part(input.image))
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": input.system or _SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+    answer = _chat_messages(messages, temperature=input.temperature, vision=True)
+    return ImageGenTextOutput(success=True, text=answer)
+
+
+@node_slot(NodeSlots.IMAGE_DESCRIBE)
+def image_describe(input: ImageDescribeInput) -> ImageDescribeOutput:
+    instruction = (
+        (input.userPrompt or "").strip()
+        or (input.text or "").strip()
+        or "Describe this image in detail."
+    )
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": instruction},
+                _image_part(input.image),
+            ],
+        }
+    ]
+    answer = _chat_messages(messages, vision=True)
+    return ImageDescribeOutput(success=True, text=answer)
+
+
 @node_slot(NodeSlots.DROP_VIDEO)
 def drop_video(input: DropVideoInput) -> DropVideoOutput:
     result = drop_video_output(input.model_dump())
@@ -333,6 +442,8 @@ _SLOT_HANDLERS: Dict[str, Any] = {
     NodeSlots.GEN_TEXT: gen_text,
     NodeSlots.COMBINE_TEXT: combine_text,
     NodeSlots.SPLIT_TEXT: split_text,
+    NodeSlots.IMAGE_GEN_TEXT: image_gen_text,
+    NodeSlots.IMAGE_DESCRIBE: image_describe,
     NodeSlots.DROP_VIDEO: drop_video,
     NodeSlots.ARRANGE_GROUP: arrange_group,
 }
