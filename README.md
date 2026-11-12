@@ -60,6 +60,6 @@ Requires `tongflow>=0.3.3` (the Advanced **Thinking** switch uses
 `current_params()`). Install into a clean venv and type-check:
 
 ```bash
-pip install "tongflow==0.3.3"
+pip install "tongflow==1.0.0"
 pyright entry.py
 ```
